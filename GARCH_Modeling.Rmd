@@ -5,53 +5,113 @@ output:
     df_print: paged
 ---
 
-
+## Load Required Libraries
 ```{r}
-# install.packages("quantmod")
-# install.packages("zoo")
-# install.packages("ggplot2")
-# install.packages("tseries")
-# install.packages("rugarch")
-# install.packages("bayesGARCH")
-
-library(quantmod)
-library(zoo)
-library(ggplot2)
-library(tseries)
-library(rugarch)
-library(bayesGARCH)
+suppressPackageStartupMessages({
+  library(quantmod) # for getSymbols
+  library(zoo) # for na.omit
+  library(ggplot2) # for plotting
+  library(tseries) # for adf.test
+  library(rugarch) # for GARCH modeling
+  library(bayesGARCH) # for Bayesian GARCH
+  library(stats) # for spectrum, acf, pacf
+})
 ```
 
-```{r}
+## Load and Plot 10-Year Treasury Yield Data
+```{r} 
+# "Market Yield on U.S. Treasury Securities at 10-Year Constant Maturity,
+# Quoted on an Investment Basis"
 getSymbols("DGS10", src = "FRED", from = "2010-01-01")
 dgs10 <- na.omit(DGS10)  # Remove missing values (e.g., holidays)
-plot(dgs10, main = "DGS10 - 10Y Treasury Constant Maturity Rate", col = "blue")
-
-# testing if its stationary
-adf.test(dgs10)
+plot(dgs10, main = "DGS10 - 10Y Treasury Constant Maturity Rate",
+     col = "blue", ylab = "Yield (%)", xlab = "Date")
 ```
+
+The yield curve clearly shows three regimes: post-GFC low rates, 
+pandemic crash (~2020), and sharp rise post-2022 (inflation, Fed tightening).
+
+## Preliminary Data Analysis
+### Check for Stationarity
+```{r}
+# testing if its stationary
+adf.test(dgs10, alternative = "stationary")
+```
+
 p-value is very large, so we have to accept H0 --> data is not stationary <br>
 GARCH models require weakly stationary time series which can be tested with ADF
 
-```{r}
-dgs10_diff <- diff(dgs10)[-1]  # Removes leading NA
-colnames(dgs10_diff) <- "DailyChange"
-plot(dgs10_diff, main = "Daily Yield Changes in DGS10", col = "darkred", ylab = "∆ Yield (%)")
+Compute daily changes, first difference to make it stationary.
 
-# testing stationarity again 
-adf.test(dgs10_diff) 
+```{r}
+# diff computes the daily change. The first value is NA since there is no
+# previous value to subtract from the first one, so we remove it.
+dgs10_diff <- diff(dgs10)[-1]
+dgs10_diff_sq <- dgs10_diff^2
+colnames(dgs10_diff_sq) <- "SquaredDailyChange"
+plot(dgs10_diff_sq, main = "Squared Daily Yield Changes in DGS10",
+     col = "darkred", ylab = "∆ Yield (%)", xlab = "Date")
 ```
 
-p-value is 0.01, so we can say that the data is weakly stationary now
+Major spikes around early 2020 (pandemic) and post-2022 (inflation uncertainty)
 
 ```{r}
-# sGARCH = Standard GARCH
+# testing stationarity of the daily changes
+adf.test(dgs10_diff_sq)
+```
+
+p-value is very low, so we can say that the data is weakly stationary now. 
+
+### Frequency Spectrum of Daily Changes
+```{r}
+# Frequency spectrum of daily changes
+spectrum(dgs10_diff_sq, method = "pgram",
+         main = "Frequency Spectrum of DGS10 Squared Daily Changes",
+         col = "darkgreen", ylab = "Power in dB", xlab = "Frequency",
+         log = "dB")
+```
+
+```{r}
+spectrum(dgs10_diff_sq, method = "pgram",
+         main = "Frequency Spectrum of DGS10 Squared Daily Changes",
+         col = "darkgreen", ylab = "Power", xlab = "Frequency",
+         log = "no")
+```
+
+The spectrum is relatively flat with higher power at very low frequencies.
+The spike near 0 indicates long-memory or persistent behavior in volatility.
+The high power at low frequencies implies low-frequency (long-term) cycles dominate.
+
+### ACF and PACF of Daily Changes
+```{r}
+acf(dgs10_diff_sq, main = "ACF of DGS10 Squared Daily Changes")
+```
+
+The ACF decays slowly and remains statistically significant for many lags.
+Reinforces the presence of volatility clustering.
+Suggests that past squared returns can predict future volatility to some extent.
+
+```{r}
+pacf(dgs10_diff_sq, main = "PACF of DGS10 Squared Daily Changes")
+```
+
+The PACF shows significant spikes up to lag ~7, especially lags 1–5.
+This suggests that the squared daily changes exhibit short-term persistence or clustering.
+There is conditional heteroskedasticity, supporting the use of ARCH/GARCH models for volatility modeling.
+
+## GARCH Model Specification and Fitting
+```{r}
+# standard GARCH(1,1) model with Student-t innovations
+# on the first difference of the 10-year Treasury yield series
 spec <- ugarchspec(
   variance.model = list(model = "sGARCH", garchOrder = c(1, 1)),
+  # mean model with no ARMA terms, just a constant mean
   mean.model = list(armaOrder = c(0, 0), include.mean = TRUE),
-  distribution.model = "std"  # Student-t for heavy tails, optional
+  # Student-t distribution, assumed distribution of shocks/random errors
+  distribution.model = "std"
 )
 
+# fit <- ugarchfit(spec, dgs10_diff_sq)
 fit <- ugarchfit(spec, dgs10_diff)
 show(fit)
 ```
@@ -83,8 +143,6 @@ N <- length(returns)
 train <- returns[1:(N - 10)]
 test <- returns[(N - 9):N]
 
-
-
 spec <- ugarchspec(
   variance.model = list(model = "sGARCH", garchOrder = c(1,1)),
   mean.model = list(armaOrder = c(0,0), include.mean = TRUE),
@@ -101,8 +159,6 @@ roll <- ugarchroll(
   solver = "hybrid",
   calculate.VaR = FALSE
 )
-
-
 
 forecasted_sigma <- as.numeric(roll@forecast$density[, "Sigma"])
 
