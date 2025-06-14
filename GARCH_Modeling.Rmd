@@ -7,6 +7,10 @@ output:
 
 ## Load Required Libraries
 ```{r}
+# install.packages(c("quantmod", "zoo", "ggplot2", "tseries", "rugarch", 
+                  #  "bayesGARCH", "stats", "timeDate", "timeSeries"), 
+                #  dependencies = TRUE, repos = "https://cloud.r-project.org/")
+
 suppressPackageStartupMessages({
   library(quantmod) # for getSymbols
   library(zoo) # for na.omit
@@ -15,6 +19,8 @@ suppressPackageStartupMessages({
   library(rugarch) # for GARCH modeling
   library(bayesGARCH) # for Bayesian GARCH
   library(stats) # for spectrum, acf, pacf
+  library(timeDate) # for business days
+  library(timeSeries) # for holidaySIFMA
 })
 ```
 
@@ -22,20 +28,102 @@ suppressPackageStartupMessages({
 ```{r} 
 # "Market Yield on U.S. Treasury Securities at 10-Year Constant Maturity,
 # Quoted on an Investment Basis"
-getSymbols("DGS10", src = "FRED", from = "2010-01-01")
-dgs10 <- na.omit(DGS10)  # Remove missing values (e.g., holidays)
-plot(dgs10, main = "DGS10 - 10Y Treasury Constant Maturity Rate",
+
+range_date_from <- "2010-01-01" # start date for data
+range_date_to <- format(Sys.Date() - 7, "%Y-%m-%d") # end date - last week
+print(paste("Loading DGS10 data from", range_date_from, "to", range_date_to))
+
+getSymbols("DGS10", src = "FRED", from = range_date_from,
+           to = range_date_to) # until yesterday
+plot(DGS10, main = "DGS10 - 10Y Treasury Constant Maturity Rate",
      col = "blue", ylab = "Yield (%)", xlab = "Date")
 ```
 
 The yield curve clearly shows three regimes: post-GFC low rates, 
 pandemic crash (~2020), and sharp rise post-2022 (inflation, Fed tightening).
+Some missing values are visible.
 
 ## Preliminary Data Analysis
+### Check for Missing Values
+```{r}
+# Helper functions
+get_year_as_num <- function(date) as.numeric(format(as.Date(date), "%Y"))
+is_bizday <- function(dates) {
+  years <- get_year_as_num(range_date_from):get_year_as_num(range_date_to)
+  holidays <- as.Date(holidayNYSE(years))
+  # Columbus Day, Veterans Day, National Day of Mourning
+  extra_holidays <-
+    as.Date(
+      c("2010-10-11", "2010-11-11", "2011-10-10", "2011-11-11", "2012-10-08",
+        "2012-11-12", "2013-10-14", "2013-11-11", "2014-10-13", "2014-11-11",
+        "2015-10-12", "2015-11-11", "2016-10-10", "2016-11-11", "2017-10-09",
+        "2018-10-08", "2018-11-12", "2018-12-05", "2019-10-14", "2019-11-11",
+        "2020-10-12", "2020-11-11", "2021-10-11", "2021-11-11", "2022-10-10",
+        "2022-11-11", "2023-10-09", "2024-10-14", "2024-11-11"))
+  holidays <- timeDate(sort(unique(c(holidays, extra_holidays))))
+
+  isBizday(dates, holidays)
+}
+
+# analysis of all days in the range
+temp_time_seq <- timeSequence(from = range_date_from,
+                              to = range_date_to,
+                              by = "day")
+all_dates <- as.Date(temp_time_seq)
+business_days <- as.Date(temp_time_seq[is_bizday(temp_time_seq)])
+non_business_days <- as.Date(setdiff(all_dates, business_days))
+earliest_date <- min(all_dates)
+latest_date <- max(all_dates)
+
+# dates in DGS10
+days_in_data <- index(DGS10)
+duplicate_days_in_data <- days_in_data[duplicated(days_in_data)]
+business_days_in_data <- business_days[business_days %in% days_in_data]
+non_business_days_in_data <- as.Date(non_business_days[non_business_days %in%
+                                                       days_in_data])
+earliest_date_in_data <- min(days_in_data)
+latest_date_in_data <- max(days_in_data)
+real_days_in_data <- days_in_data[days_in_data %in% all_dates]
+missing_days <- as.Date(setdiff(all_dates, days_in_data))
+missing_business_days <- as.Date(setdiff(business_days, days_in_data))
+missing_non_business_days <- as.Date(setdiff(non_business_days, days_in_data))
+
+# Analysis of NAs
+days_with_na_in_data <- index(DGS10[is.na(DGS10)])
+business_days_with_na_in_data <- business_days[business_days %in%
+                                                 days_with_na_in_data]
+non_business_days_with_na <- non_business_days[non_business_days %in%
+                                                 days_with_na_in_data]
+# printing results
+cat("Business Days in Data:", length(business_days_in_data), "\n")
+cat("Non-Business Days in Data:", length(non_business_days_in_data), "\n")
+cat("Missing Days in Data:", length(missing_days), "\n")
+cat("Missing Business Days in Data:", length(missing_business_days),
+    paste(missing_business_days, collapse = ", "), "\n")
+cat("Missing Non-Business Days in Data:", length(missing_non_business_days), "\n")
+print("\n")
+cat("Days with NA in Data:", length(days_with_na_in_data), "\n")
+cat("Business Days with NA in Data:", length(business_days_with_na_in_data), "\n")
+cat("Non-Business Days with NA in Data:", length(non_business_days_with_na), "\n")
+print("\n")
+cat("Business Days with NA in Data:", paste(business_days_with_na_in_data, collapse = ", "), "\n")
+```
+
+--> Missing dates in DGS10 are all non-business days (eg holidays) <br>
+--> Weirdly, some non-business days are in the data, however with NA values <br>
+--> All NAs are on non-business days, so we can safely remove them, meaning no values are missing <br>
+
+### Removing NAs
+```{r}
+DGS10 <- na.omit(DGS10)
+plot(DGS10, main = "DGS10 - 10Y Treasury Constant Maturity Rate",
+     col = "blue", ylab = "Yield (%)", xlab = "Date")
+```
+
 ### Check for Stationarity
 ```{r}
 # testing if its stationary
-adf.test(dgs10, alternative = "stationary")
+adf.test(DGS10, alternative = "stationary")
 ```
 
 p-value is very large, so we have to accept H0 --> data is not stationary <br>
@@ -46,10 +134,10 @@ Compute daily changes, first difference to make it stationary.
 ```{r}
 # diff computes the daily change. The first value is NA since there is no
 # previous value to subtract from the first one, so we remove it.
-dgs10_diff <- diff(dgs10)[-1]
-dgs10_diff_sq <- dgs10_diff^2
-colnames(dgs10_diff_sq) <- "SquaredDailyChange"
-plot(dgs10_diff_sq, main = "Squared Daily Yield Changes in DGS10",
+DGS10_diff <- diff(DGS10)[-1]
+DGS10_diff_sq <- DGS10_diff^2
+colnames(DGS10_diff_sq) <- "SquaredDailyChange"
+plot(DGS10_diff_sq, main = "Squared Daily Yield Changes in DGS10",
      col = "darkred", ylab = "∆ Yield (%)", xlab = "Date")
 ```
 
@@ -57,7 +145,7 @@ Major spikes around early 2020 (pandemic) and post-2022 (inflation uncertainty)
 
 ```{r}
 # testing stationarity of the daily changes
-adf.test(dgs10_diff_sq)
+adf.test(DGS10_diff_sq)
 ```
 
 p-value is very low, so we can say that the data is weakly stationary now. 
@@ -65,14 +153,14 @@ p-value is very low, so we can say that the data is weakly stationary now.
 ### Frequency Spectrum of Daily Changes
 ```{r}
 # Frequency spectrum of daily changes
-spectrum(dgs10_diff_sq, method = "pgram",
+spectrum(DGS10_diff_sq, method = "pgram",
          main = "Frequency Spectrum of DGS10 Squared Daily Changes",
          col = "darkgreen", ylab = "Power in dB", xlab = "Frequency",
          log = "dB")
 ```
 
 ```{r}
-spectrum(dgs10_diff_sq, method = "pgram",
+spectrum(DGS10_diff_sq, method = "pgram",
          main = "Frequency Spectrum of DGS10 Squared Daily Changes",
          col = "darkgreen", ylab = "Power", xlab = "Frequency",
          log = "no")
@@ -84,7 +172,7 @@ The high power at low frequencies implies low-frequency (long-term) cycles domin
 
 ### ACF and PACF of Daily Changes
 ```{r}
-acf(dgs10_diff_sq, main = "ACF of DGS10 Squared Daily Changes")
+acf(DGS10_diff_sq, main = "ACF of DGS10 Squared Daily Changes")
 ```
 
 The ACF decays slowly and remains statistically significant for many lags.
@@ -92,7 +180,7 @@ Reinforces the presence of volatility clustering.
 Suggests that past squared returns can predict future volatility to some extent.
 
 ```{r}
-pacf(dgs10_diff_sq, main = "PACF of DGS10 Squared Daily Changes")
+pacf(DGS10_diff_sq, main = "PACF of DGS10 Squared Daily Changes")
 ```
 
 The PACF shows significant spikes up to lag ~7, especially lags 1–5.
@@ -112,7 +200,7 @@ spec <- ugarchspec(
 )
 
 # fit <- ugarchfit(spec, dgs10_diff_sq)
-fit <- ugarchfit(spec, dgs10_diff)
+fit <- ugarchfit(spec, DGS10_diff)
 show(fit)
 ```
 
