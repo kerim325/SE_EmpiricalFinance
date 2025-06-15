@@ -145,12 +145,16 @@ plot(DGS10_diff_sq, main = "Squared Daily Yield Changes in DGS10",
 
 Major spikes around early 2020 (pandemic) and post-2022 (inflation uncertainty)
 
+
+
+
+
 ```{r}
 # testing stationarity of the daily changes
 adf.test(DGS10_diff_sq)
 ```
 
-p-value is very low, so we can say that the data is weakly stationary now. 
+p-value is very low, so we can say that the data is weakly stationary now (there is enough statistical evidence to reject H0). 
 
 ### Frequency Spectrum of Daily Changes
 ```{r}
@@ -203,6 +207,8 @@ The mean of the differenced yield series (i.e. daily yield changes) is not stati
 --> mean model: ARIMA(0,0,0) with zero mean
 
 ### Model Fitting
+We should use the simple differenced data (not the squared values). The squared resiudals are implicitly handled inside the GARCH model.
+
 ```{r}
 # standard GARCH(1,1) model with Student-t innovations
 # on the first difference of the 10-year Treasury yield series
@@ -227,9 +233,73 @@ show(fit)
 - Stability Test: model parameters are stable
 - Ljung-Box Test: no autocorrelation in residuals or squared residuals
 - Sign Bias: Tests whether residual sign alone affects conditional variance
-- Negative Sign Bias: Tests whether negative shocks increase volatility more than expected, p = 0.104 --> small assymetry
+- Negative Sign Bias: Tests whether negative shocks increase volatility more than expected, p = 0.19 --> small assymetry
 - Positive Sign Bias: Tests whether positive shocks increase volatility differently
 - Joint Effect: F-test of all three biases combined
+
+### GARCH model selection with grid search
+Testing GARCH(p, q, distribution) with parameters $p, q \in \{1, ..., 5\}$, and distribution for normal and student-t.
+
+```{r}
+best_aic <- Inf
+best_spec <- NULL
+best_fit <- NULL
+distributions <- c("norm", "std")
+
+for (dist in distributions){
+  for (p in 1:5) {
+    for (q in 1:5) {
+      spec <- ugarchspec(
+        variance.model = list(model = "sGARCH", garchOrder = c(p, q)),
+        mean.model = list(armaOrder = c(0, 0), include.mean = TRUE),
+        distribution.model = dist
+      )
+      fit <- tryCatch(ugarchfit(spec, DGS10_diff, solver = "hybrid"), error = function(e) NULL)
+      
+      if (!is.null(fit)) {
+        aic <- infocriteria(fit)[1]  # [1] = AIC
+        if (aic < best_aic) {
+          best_aic <- aic
+          best_spec <- spec
+          best_fit <- fit
+        }
+      }
+    }
+  }
+}
+
+show(best_fit)
+
+```
+
+```{r}
+spec_norm <- ugarchspec(
+  variance.model = list(model = "sGARCH", garchOrder = c(1, 1)),
+  mean.model = list(armaOrder = c(0, 0)),
+  distribution.model = "std"
+)
+fit_norm <- ugarchfit(spec_norm, DGS10_diff)
+
+resids <- residuals(fit_norm, standardize = TRUE)
+
+
+# Plot the histogram of standardized residuals
+hist(resids, breaks = 50, probability = TRUE,  # 'probability=TRUE' scales y-axis to density
+     main = "Standardized Residuals (Student-t)", 
+     col = "skyblue", border = "white", 
+     xlab = "Residuals")
+
+# Overlay standard normal density curve
+x_vals <- seq(min(resids), max(resids), length.out = 500)
+y_vals <- dnorm(x_vals)  # Standard normal density
+
+lines(x_vals, y_vals, col = rgb(0, 0, 0, alpha = 0.4), lwd = 2)
+```
+
+Best parameter setup (based on lowest AIC) is: GARCH(1, 1) with student-t innovations. The standardized residuals approximate a standard normal distribution very well which means that the student-t innovations are appropriate for GARCH.
+
+
+
 
 ### GARCH with MLE, rolling prediction
 
