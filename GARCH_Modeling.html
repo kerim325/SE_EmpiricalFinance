@@ -1626,9 +1626,10 @@ display: none;
 
 <div id="load-required-libraries" class="section level2">
 <h2>Load Required Libraries</h2>
-<pre class="r"><code># install.packages(c(&quot;quantmod&quot;, &quot;zoo&quot;, &quot;ggplot2&quot;, &quot;tseries&quot;, &quot;rugarch&quot;, 
-                  #  &quot;bayesGARCH&quot;, &quot;stats&quot;, &quot;timeDate&quot;, &quot;timeSeries&quot;), 
-                #  dependencies = TRUE, repos = &quot;https://cloud.r-project.org/&quot;)
+<pre class="r"><code># install.packages(c(&quot;quantmod&quot;, &quot;zoo&quot;, &quot;ggplot2&quot;, &quot;tseries&quot;, &quot;rugarch&quot;,
+#  &quot;bayesGARCH&quot;, &quot;stats&quot;, &quot;timeDate&quot;, &quot;timeSeries&quot;,
+#  &quot;forecast&quot;),
+#  dependencies = TRUE, repos = &quot;https://cloud.r-project.org/&quot;)
 
 suppressPackageStartupMessages({
   library(quantmod) # for getSymbols
@@ -1640,6 +1641,7 @@ suppressPackageStartupMessages({
   library(stats) # for spectrum, acf, pacf
   library(timeDate) # for business days
   library(timeSeries) # for holidaySIFMA
+  library(forecast) # for auto.arima
 })</code></pre>
 </div>
 <div id="load-and-plot-10-year-treasury-yield-data" class="section level2">
@@ -1820,6 +1822,24 @@ supporting the use of ARCH/GARCH models for volatility modeling.</p>
 </div>
 <div id="garch-model-specification-and-fitting" class="section level2">
 <h2>GARCH Model Specification and Fitting</h2>
+<div id="mean-model-selection" class="section level3">
+<h3>Mean model selection</h3>
+<pre class="r"><code>auto.arima(coredata(DGS10_diff),
+           d = 0, # already differenced
+           max.p = 10, max.q = 10,
+           stationary = TRUE,
+           seasonal = FALSE)</code></pre>
+<pre><code>## Series: coredata(DGS10_diff) 
+## ARIMA(0,0,0) with zero mean 
+## 
+## sigma^2 = 0.002925:  log likelihood = 5781.84
+## AIC=-11561.67   AICc=-11561.67   BIC=-11555.41</code></pre>
+<p>The mean of the differenced yield series (i.e. daily yield changes)
+is not statistically different from zero. –&gt; ARIMA(0,0,0) with zero
+mean</p>
+</div>
+<div id="model-fitting" class="section level3">
+<h3>Model Fitting</h3>
 <pre class="r"><code># standard GARCH(1,1) model with Student-t innovations
 # on the first difference of the 10-year Treasury yield series
 spec &lt;- ugarchspec(
@@ -1927,7 +1947,8 @@ show(fit)</code></pre>
 ## 4    50    1198.4   8.973e-219
 ## 
 ## 
-## Elapsed time : 0.542552</code></pre>
+## Elapsed time : 0.5267389</code></pre>
+</div>
 </div>
 <div id="garch-model-evaluation-summary" class="section level2">
 <h2>GARCH Model Evaluation Summary</h2>
@@ -2038,7 +2059,7 @@ ggplot(comparison_df, aes(x = Day)) +
 
 
 fit_bayes &lt;- fit_bayesian_garch(returns, control = list(l.chain = 10))</code></pre>
-<pre><code>## chain:  1  iteration:  10  parameters:  0.01 0.1 0.7 111.2701</code></pre>
+<pre><code>## chain:  1  iteration:  10  parameters:  0.01 0.1 0.7 80.5965</code></pre>
 <pre class="r"><code>summary(fit_bayes)</code></pre>
 <pre><code>## 
 ## Iterations = 1:10
@@ -2049,19 +2070,19 @@ fit_bayes &lt;- fit_bayesian_garch(returns, control = list(l.chain = 10))</code>
 ## 1. Empirical mean and standard deviation for each variable,
 ##    plus standard error of the mean:
 ## 
-##          Mean    SD Naive SE Time-series SE
-## alpha0   0.01 0.000    0.000          0.000
-## alpha1   0.10 0.000    0.000          0.000
-## beta     0.70 0.000    0.000          0.000
-## nu     105.95 6.573    2.078          5.463
+##         Mean    SD Naive SE Time-series SE
+## alpha0  0.01 0.000    0.000          0.000
+## alpha1  0.10 0.000    0.000          0.000
+## beta    0.70 0.000    0.000          0.000
+## nu     95.82 8.731    2.761          6.994
 ## 
 ## 2. Quantiles for each variable:
 ## 
-##         2.5%   25%    50%    75%  97.5%
-## alpha0  0.01  0.01   0.01   0.01   0.01
-## alpha1  0.10  0.10   0.10   0.10   0.10
-## beta    0.70  0.70   0.70   0.70   0.70
-## nu     98.22 99.99 106.41 110.99 115.79</code></pre>
+##         2.5%   25%   50%    75%  97.5%
+## alpha0  0.01  0.01  0.01   0.01   0.01
+## alpha1  0.10  0.10  0.10   0.10   0.10
+## beta    0.70  0.70  0.70   0.70   0.70
+## nu     81.33 92.04 96.53 102.18 106.72</code></pre>
 <pre class="r"><code>posterior &lt;- fit_bayes$chain1
 colnames(posterior) &lt;- c(&quot;alpha0&quot;, &quot;alpha1&quot;, &quot;beta&quot;, &quot;nu&quot;)
 
@@ -2077,15 +2098,15 @@ posterior</code></pre>
 ## Thinning interval = 1 
 ##    alpha0 alpha1 beta        nu
 ## 1    0.01    0.1  0.7 100.00000
-## 2    0.01    0.1  0.7  98.15096
-## 3    0.01    0.1  0.7  98.47752
-## 4    0.01    0.1  0.7  99.98984
-## 5    0.01    0.1  0.7 105.94455
-## 6    0.01    0.1  0.7 110.15001
-## 7    0.01    0.1  0.7 106.86721
-## 8    0.01    0.1  0.7 111.63561
-## 9    0.01    0.1  0.7 117.00026
-## 10   0.01    0.1  0.7 111.27012</code></pre>
+## 2    0.01    0.1  0.7 104.80197
+## 3    0.01    0.1  0.7 107.28246
+## 4    0.01    0.1  0.7 102.90494
+## 5    0.01    0.1  0.7  98.47332
+## 6    0.01    0.1  0.7  94.49906
+## 7    0.01    0.1  0.7  94.59366
+## 8    0.01    0.1  0.7  91.22460
+## 9    0.01    0.1  0.7  83.85354
+## 10   0.01    0.1  0.7  80.59654</code></pre>
 </div>
 
 
