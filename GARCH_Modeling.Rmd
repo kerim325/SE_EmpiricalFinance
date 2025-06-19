@@ -23,6 +23,7 @@ suppressPackageStartupMessages({
   library(timeDate) # for business days
   library(timeSeries) # for holidaySIFMA
   library(forecast) # for auto.arima
+  library(xts)
 })
 ```
 
@@ -35,8 +36,9 @@ range_date_from <- "2010-01-01" # start date for data
 range_date_to <- format(Sys.Date() - 7, "%Y-%m-%d") # end date - last week
 print(paste("Loading DGS10 data from", range_date_from, "to", range_date_to))
 
-getSymbols("DGS10", src = "FRED", from = range_date_from,
-           to = range_date_to) # until yesterday
+#getSymbols("DGS10", src = "FRED", from = range_date_from, to = range_date_to) # until yesterday
+DGS10 <- read.csv("DGS10.csv")
+DGS10 <- xts(DGS10$DGS10, order.by = as.Date(DGS10$observation_date))
 plot(DGS10, main = "DGS10 - 10Y Treasury Constant Maturity Rate",
      col = "blue", ylab = "Yield (%)", xlab = "Date")
 ```
@@ -223,7 +225,6 @@ spec <- ugarchspec(
 fit <- ugarchfit(spec, DGS10_diff)
 show(fit)
 ```
-
 ### GARCH Model Evaluation Summary
 
 - MLE converged because log-likelihood is finite
@@ -352,53 +353,81 @@ ggplot(comparison_df, aes(x = Day)) +
   theme_minimal()
 ```
 
-## Bayesian GARCH (Not working properly)
+## Key Event Modelling using GARCH
+Estimate a model with 2025 as the test set and everything before as the training set.
+Additionally, modelling some key events (COVID, first TRUMP term) using inidcators as key events.
+```{r}
+# Using data DGS10
+train_start <- "2010-01-01"
+train_end <- "2024-12-31"
+train_data_raw <- DGS10_diff[paste0(train_start, "/", train_end)]
+test_data <- na.omit(DGS10_diff["2025-01-01/"])
+spec <- ugarchspec(
+  variance.model = list(model = "sGARCH", garchOrder = c(1, 1)),
+  mean.model = list(armaOrder = c(0, 0), include.mean = TRUE),
+  distribution.model = "std"
+)
+fit_no_indicators <- ugarchfit(spec, train_data_raw)
+# Extract residuals and squared residuals
+residuals_train <- residuals(fit_no_indicators, standardize = TRUE)
+squared_residuals_train <- residuals(fit_no_indicators, standardize = FALSE)^2
+
+```
 
 ```{r}
-fit_bayesian_garch <- function(r, control = list(n.chain = 1, l.chain = 10000), 
-                               scale.factor = 1, silent = TRUE) {
-  # Check package
-  if (!requireNamespace("bayesGARCH", quietly = TRUE)) {
-    stop("You need to install the 'bayesGARCH' package.")
-  }
-  
-  # Scale input
-  r_scaled <- as.numeric(r * scale.factor)
-  
-  # Fit model
-  if (silent) {
-    suppressMessages({
-      fit <- bayesGARCH::bayesGARCH(r_scaled, control = control)
-    })
-  } else {
-    fit <- bayesGARCH::bayesGARCH(r_scaled, control = control)
-  }
-  
-  attr(fit, "scale.factor") <- scale.factor
-  return(fit)
-}
+# Create indicators for key events
+key_events <- data.frame(
+  COVID = ifelse(index(train_data) >= as.Date("2020-03-01") & index(train_data) <= as.Date("2021-12-31"), 1, 0),
+  Trump = ifelse(index(train_data) >= as.Date("2016-11-08") & index(train_data) <= as.Date("2020-01-20"), 1, 0)
+)
+# Add indicators to the training data
+train_data <- train_data_raw
+# Fit GARCH model with indicators
+spec_with_indicators <- ugarchspec(
+  variance.model = list(model = "sGARCH", garchOrder = c(1, 1)),
+  mean.model = list(
+    armaOrder = c(0, 0), 
+    include.mean = TRUE,
+    external.regressors = as.matrix(key_events)
+  ),
+  distribution.model = "std"
+)
+fit_with_indicators <- ugarchfit(spec_with_indicators, train_data[,1])
+# Extract residuals and squared residuals with indicators
+residuals_train_with_indicators <- residuals(fit_with_indicators, standardize = TRUE)
+squared_residuals_train_with_indicators <- residuals(fit_with_indicators, standardize = FALSE)^2
+```
 
+```{r}
+# Forecasting with the fitted model
+forecast_orig <- ugarchforecast(fit_with_indicators, n.ahead = nrow(test_data))
+# Extract forecasted volatility
+forecasted_volatility <- as.numeric(forecast@forecast$sigmaFor)
+# Prepare data for plotting
+forecasted_data <- data.frame(
+  Date = index(test_data),
+  ForecastedVolatility = forecasted_volatility
+)
+```
 
+```{r}
+coef(fit_no_indicators)
+infocriteria(fit_no_indicators)
 
-
-fit_bayes <- fit_bayesian_garch(DGS10_diff, control = list(l.chain = 10))
-summary(fit_bayes)
+coef(fit_with_indicators)
+infocriteria(fit_with_indicators)
 ```
 
 
-
 ```{r}
-posterior <- fit_bayes$chain1
-colnames(posterior) <- c("alpha0", "alpha1", "beta", "nu")
+# Plotting the forecasted volatility along with the actual volatility for both the original model and the key event model
+ggplot() +
+  geom_line(data = forecasted_data, aes(x = Date, y = ForecastedVolatility), color = "blue", size = 1.2) +
+  geom_line(data = data.frame(Date = index(test_data), ActualVolatility = abs(test_data)), aes(x = Date, y = ActualVolatility), color = "red", linetype = "solid", size = 1) +
+  labs(title = "Forecasted Volatility with Key Events vs Actual Volatility",
+       y = "Volatility (abs return or sigma)", x = "Date") +
+  theme_minimal()
 
-mu     <- mean(DGS10_diff)
-#omega  <- mean(posterior$alpha0)
-#alpha  <- mean(posterior$alpha1)
-#beta   <- mean(posterior$beta)
-
-posterior
 ```
-
-
 
 
