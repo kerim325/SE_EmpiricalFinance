@@ -24,6 +24,7 @@ suppressPackageStartupMessages({
   library(timeSeries) # for holidaySIFMA
   library(forecast) # for auto.arima
   library(xts)
+  library(strucchange)
 })
 ```
 
@@ -56,8 +57,7 @@ is_bizday <- function(dates) {
   years <- get_year_as_num(range_date_from):get_year_as_num(range_date_to)
   holidays <- as.Date(holidayNYSE(years))
   # Columbus Day, Veterans Day, National Day of Mourning
-  extra_holidays <-
-    as.Date(
+  extra_holidays <-as.Date(
       c("2010-10-11", "2010-11-11", "2011-10-10", "2011-11-11", "2012-10-08",
         "2012-11-12", "2013-10-14", "2013-11-11", "2014-10-13", "2014-11-11",
         "2015-10-12", "2015-11-11", "2016-10-10", "2016-11-11", "2017-10-09",
@@ -197,6 +197,17 @@ There is conditional heteroskedasticity, supporting the use of ARCH/GARCH models
 
 ## GARCH Model Specification and Fitting
 ### Mean model selection
+
+```{r}
+acf(DGS10_diff, main = "ACF of DGS10 Daily Changes")
+```
+
+```{r}
+pacf(DGS10_diff_sq, main = "PACF of DGS10 Daily Changes")
+```
+
+
+
 ```{r}
 auto.arima(coredata(DGS10_diff),
            d = 0, # already differenced
@@ -207,6 +218,7 @@ auto.arima(coredata(DGS10_diff),
 
 The mean of the differenced yield series (i.e. daily yield changes) is not statistically different from zero.
 --> mean model: ARIMA(0,0,0) with zero mean
+The ACF also supports this selection because we don't see any significant autocorrelation there.
 
 ### Model Fitting
 We should use the simple differenced data (not the squared values). The squared resiudals are implicitly handled inside the GARCH model.
@@ -273,6 +285,8 @@ show(best_fit)
 
 ```
 
+### Inspecting the fit of the model - standardized residual diagnostics
+
 ```{r}
 spec_norm <- ugarchspec(
   variance.model = list(model = "sGARCH", garchOrder = c(1, 1)),
@@ -283,75 +297,173 @@ fit_norm <- ugarchfit(spec_norm, DGS10_diff)
 
 resids <- residuals(fit_norm, standardize = TRUE)
 
+hist(resids, breaks = 50, freq = FALSE, col = "lightblue",
+     main = "Standardized Residuals",
+     xlab = "Value")
 
-# Plot the histogram of standardized residuals
-hist(resids, breaks = 50, probability = TRUE,  # 'probability=TRUE' scales y-axis to density
-     main = "Standardized Residuals (Student-t)", 
-     col = "skyblue", border = "white", 
-     xlab = "Residuals")
+# Add standard normal density curve
+curve(dnorm(x, mean = 0, sd = 1), col = "black", lwd = 2, add = TRUE)
 
-# Overlay standard normal density curve
-x_vals <- seq(min(resids), max(resids), length.out = 500)
-y_vals <- dnorm(x_vals)  # Standard normal density
-
-lines(x_vals, y_vals, col = rgb(0, 0, 0, alpha = 0.4), lwd = 2)
+# Add legend
+legend("topright", legend = "Standard Normal", 
+       col = "black", lwd = 2, bty = "n")
 ```
+
+```{r}
+acf(resids, main = "ACF of GARCH(1,1) Standardized Residuals")
+```
+
+```{r}
+acf(resids^2, main = "ACF of GARCH(1,1) Squared Standardized Residuals")
+```
+
+```{r}
+plot(resids, type = "l", main = "Standardized Residuals", 
+     ylab = "Residual", xlab = "Time", col = "darkred")
+```
+
 
 Best parameter setup (based on lowest AIC) is: GARCH(1, 1) with student-t innovations. The standardized residuals approximate a standard normal distribution very well which means that the student-t innovations are appropriate for GARCH.
 
+Also, the selected model is backed up by the results: the standardized residuals are approximately standard normal, there is no autocorrelation between either the residuals or the squared residuals. The residuals seem to be more or less homoscedastic - at least there is less volatility clustering. 
 
 
 
-### GARCH with MLE, rolling prediction
+
+### GARCH with MLE, rolling prediction for the last 3 months
 
 ```{r}
+# Length of time series
 N <- length(DGS10_diff)
 
-# Use all but last 10 for training
-train <- DGS10_diff[1:(N - 10)]
-test <- DGS10_diff[(N - 9):N]
+# Set forecast length to ~3 months (63 trading days)
+forecast_horizon <- 63
 
+# Define train/test
+train <- DGS10_diff[1:(N - forecast_horizon)]
+test <- DGS10_diff[(N - forecast_horizon + 1):N]
+
+# GARCH(1,1) specification with Student-t errors
 spec <- ugarchspec(
-  variance.model = list(model = "sGARCH", garchOrder = c(1,1)),
-  mean.model = list(armaOrder = c(0,0), include.mean = TRUE),
+  variance.model = list(model = "sGARCH", garchOrder = c(1, 1)),
+  mean.model = list(armaOrder = c(0, 0), include.mean = TRUE),
   distribution.model = "std"
 )
 
-# Rolling 1-day ahead forecast over last 10 points
+# Rolling 1-day ahead forecast
 roll <- ugarchroll(
   spec,
   data = DGS10_diff,
-  forecast.length = 10,
+  forecast.length = forecast_horizon,
   refit.every = 1,
   refit.window = "moving",
   solver = "hybrid",
   calculate.VaR = FALSE
 )
 
+# Extract forecasted sigma (volatility)
 forecasted_sigma <- as.numeric(roll@forecast$density[, "Sigma"])
+forecasted_var <- forecasted_sigma^2  # conditional variance
 
-# Extract actual returns over the forecast period
-realized_returns <- tail(DGS10_diff, 10)
-realized_vol <- abs(realized_returns)  # or use squared: realized_returns^2
+# Use squared returns as proxy for realized volatility
+realized_returns <- tail(DGS10_diff, forecast_horizon)
+realized_vol <- realized_returns^2
 
-# Prepare dataframe for plotting
+# Data for plotting
 comparison_df <- data.frame(
-  Day = 1:10,
-  ForecastedVol = forecasted_sigma,
-  RealizedVol = realized_vol
+  Day = 1:forecast_horizon,
+  ForecastedVar = forecasted_var,
+  RealizedVar = realized_vol
 )
 
-
-# Plotting the results
+# Plot
 ggplot(comparison_df, aes(x = Day)) +
-  geom_line(aes(y = ForecastedVol), color = "blue", size = 1.2) +
-  geom_line(aes(y = DGS10), color = "red", linetype = "dashed", size = 1.2) +
+  geom_line(aes(y = ForecastedVar), color = "blue", size = 1.2) +
+  geom_line(aes(y = RealizedVar), color = "red", linetype = "dashed", size = 1.2) +
   labs(
-    title = "Rolling 1-Day Ahead GARCH Volatility Forecast vs Realized Volatility",
-    y = "Volatility (abs return or sigma)", x = "Forecast Day"
+    title = "GARCH Forecasted Conditional Variance vs Squared Realized Returns",
+    y = "Variance", x = "Forecast Day"
   ) +
   theme_minimal()
 ```
+
+3 months prediction: GARCH catches the trends but reacts slowly to them.
+
+### GARCH With Indicators
+
+```{r}
+# Setup
+N <- length(DGS10_diff)
+forecast_horizon <- 63
+full_index <- index(DGS10_diff)
+realized_returns <- tail(DGS10_diff, forecast_horizon)
+realized_var <- realized_returns^2
+
+# Define rolling predictions container
+forecasted_var_with_indicators <- numeric(forecast_horizon)
+
+# Create full event matrix matching the entire series
+event_indicators_full <- data.frame(
+  COVID = ifelse(full_index >= as.Date("2020-03-01") & full_index <= as.Date("2020-05-15"), 1, 0),
+  EnergyFed2022 = ifelse(full_index >= as.Date("2022-03-01") & full_index <= as.Date("2022-10-01"), 1, 0),
+  PreElection = ifelse(full_index >= as.Date("2023-12-01") & full_index <= as.Date("2024-06-15"), 1, 0)
+)
+
+# Rolling forecast with external regressors
+for (i in 1:forecast_horizon) {
+  
+  # Subset data up to time t + i - 1
+  train_slice <- DGS10_diff[1:(N - forecast_horizon + i - 1)]
+  reg_slice <- event_indicators_full[1:(N - forecast_horizon + i - 1), ]
+
+  # Take the matching regressors for variance equation
+  spec_step <- ugarchspec(
+    variance.model = list(model = "sGARCH", garchOrder = c(1, 1),
+                          external.regressors = as.matrix(reg_slice)),
+    mean.model = list(armaOrder = c(0, 0), include.mean = TRUE),
+    distribution.model = "std"
+  )
+
+  # Fit and forecast
+  fit_step <- ugarchfit(spec_step, train_slice, solver = "hybrid", solver.control = list(trace = 0))
+  fc <- ugarchforecast(fit_step, n.ahead = 1)
+  forecasted_var_with_indicators[i] <- sigma(fc)^2
+}
+
+```
+
+
+
+
+```{r}
+# Comparison dataframe
+comparison_df <- data.frame(
+  Day = 1:forecast_horizon,
+  RealizedVar = realized_var,
+  ForecastedVar_NoIndicators = forecasted_var,  # from ugarchroll
+  ForecastedVar_Indicators = forecasted_var_with_indicators
+)
+
+ggplot(comparison_df, aes(x = Day)) +
+  geom_line(aes(y = ForecastedVar_NoIndicators, color = "No Indicators"), size = 1.2) +
+  geom_line(aes(y = ForecastedVar_Indicators, color = "With Indicators"), size = 1.2) +
+  geom_line(aes(y = RealizedVar, color = "Realized Volatility"), linetype = "dashed", size = 1.2) +
+  scale_color_manual(values = c("No Indicators" = "blue",
+                                "With Indicators" = "darkgreen",
+                                "Realized Volatility" = "red")) +
+  labs(
+    title = "Rolling 1-Day GARCH Forecasts: With and Without Event Indicators",
+    y = "Variance", x = "Forecast Day",
+    color = "Legend"
+  ) +
+  theme_minimal()
+```
+
+
+
+
+
+
 
 ## Key Event Modelling using GARCH
 Estimate a model with 2025 as the test set and everything before as the training set.
@@ -368,7 +480,7 @@ spec <- ugarchspec(
   mean.model = list(armaOrder = c(0, 0), include.mean = TRUE),
   distribution.model = "std"
 )
-fit_no_indicators <- ugarchfit(spec, train_data_raw)
+fit_no_indicators <- ugarchfit(spec, train_data)
 # Extract residuals and squared residuals
 residuals_train <- residuals(fit_no_indicators, standardize = TRUE)
 squared_residuals_train <- residuals(fit_no_indicators, standardize = FALSE)^2
@@ -401,6 +513,8 @@ residuals_train_with_indicators <- residuals(fit_with_indicators, standardize = 
 squared_residuals_train_with_indicators <- residuals(fit_with_indicators, standardize = FALSE)^2
 ```
 
+
+
 ```{r}
 # Forecasting with the fitted model
 forecast_indicators <- ugarchforecast(fit_with_indicators, n.ahead = nrow(test_data))
@@ -425,6 +539,8 @@ infocriteria(fit_with_indicators)
 ```
 
 
+
+
 ```{r}
 # Plotting the forecasted volatility along with the actual volatility for both the original model and the key event model
 ggplot() +
@@ -436,5 +552,299 @@ ggplot() +
   theme_minimal()
 
 ```
+
+### Only the spikes of the events
+
+```{r}
+key_events <- data.frame(
+  COVID = ifelse(index(train_data) >= as.Date("2020-01-01") & index(train_data) <= as.Date("2020-05-01"), 1, 0),
+  Trump = ifelse(index(train_data) >= as.Date("2022-03-01") & index(train_data) <= as.Date("2022-10-01"), 1, 0),
+  Energy = ifelse(index(train_data) >= as.Date("2023-12-01") & index(train_data) <= as.Date("2024-06-15"),1, 0)
+)
+
+
+# Fit GARCH model with indicators
+spec_with_indicators <- ugarchspec(
+  variance.model = list(
+    model = "sGARCH",
+    garchOrder = c(1, 1),
+    external.regressors = as.matrix(key_events)),
+  mean.model = list(
+    armaOrder = c(0, 0), 
+    include.mean = TRUE,
+    external.regressors = as.matrix(key_events)
+  ),
+  distribution.model = "std"
+)
+fit_with_indicators <- ugarchfit(spec_with_indicators, train_data$Vola)
+# Extract residuals and squared residuals with indicators
+residuals_train_with_indicators <- residuals(fit_with_indicators, standardize = TRUE)
+squared_residuals_train_with_indicators <- residuals(fit_with_indicators, standardize = FALSE)^2
+```
+
+```{r}
+fit_with_indicators
+```
+
+
+## Break of structure - Bai-Perron test
+
+```{r}
+# Construct proper data frame with squared returns
+squared_df <- data.frame(squared = DGS10_diff^2)
+
+# Apply Bai–Perron test with intercept-only model
+break_model <- breakpoints(squared ~ 1, data = squared_df, h = 0.15)
+
+# Summarize breakpoints
+summary(break_model)
+```
+
+
+```{r}
+# Construct proper data frame with squared returns
+squared_df <- data.frame(squared = DGS10_diff^2)
+
+# Convert to zoo object
+squared_zoo <- zoo(squared_df$squared, order.by = as.Date(rownames(squared_df)))
+
+# Fit Bai–Perron model
+break_model <- breakpoints(squared ~ 1, data = squared_df)
+
+# Get breakpoint indices and convert to dates
+bp_indices <- break_model$breakpoints
+bp_dates <- as.Date(rownames(squared_df)[bp_indices])
+```
+
+```{r}
+# Plot with actual dates
+plot(squared_zoo, type = "l", 
+     main = "Squared Returns with Bai–Perron Breakpoints",
+     xlab = "Date", ylab = "Squared Returns")
+
+# Add vertical lines at breakpoints
+abline(v = bp_dates, col = "red", lty = 2)
+
+print(bp_dates)
+```
+
+Two breakpoints: 2012-04-24 and 2022-02-03
+
+### New events based on the breakpoints
+```{r}
+# Setup
+N <- length(DGS10_diff)
+forecast_horizon <- 63
+full_index <- index(DGS10_diff)
+realized_returns <- tail(DGS10_diff, forecast_horizon)
+realized_var <- realized_returns^2
+
+# Define rolling predictions container
+forecasted_var_with_indicators <- numeric(forecast_horizon)
+
+# Create full event matrix matching the entire series
+event_indicators_full <- data.frame(
+  Regime1 = ifelse(full_index >= as.Date("2012-04-24") & full_index <= as.Date("2012-10-01"), 1, 0),
+  Regime2 = ifelse(full_index >= as.Date("2022-02-03") & full_index <= as.Date("2022-12-01"), 1, 0)
+)
+
+# Rolling forecast with external regressors
+for (i in 1:forecast_horizon) {
+  
+  # Subset data up to time t + i - 1
+  train_slice <- DGS10_diff[1:(N - forecast_horizon + i - 1)]
+  reg_slice <- event_indicators_full[1:(N - forecast_horizon + i - 1), ]
+
+  # Take the matching regressors for variance equation
+  spec_step <- ugarchspec(
+    variance.model = list(model = "sGARCH", garchOrder = c(1, 1),
+                          external.regressors = as.matrix(reg_slice)),
+    mean.model = list(armaOrder = c(0, 0), include.mean = TRUE),
+    distribution.model = "std"
+  )
+
+  # Fit and forecast
+  fit_step <- ugarchfit(spec_step, train_slice, solver = "hybrid", solver.control = list(trace = 0))
+  fc <- ugarchforecast(fit_step, n.ahead = 1)
+  forecasted_var_with_indicators[i] <- sigma(fc)^2
+}
+```
+
+
+```{r}
+# Comparison dataframe
+comparison_df <- data.frame(
+  Day = 1:forecast_horizon,
+  RealizedVar = realized_var,
+  ForecastedVar_NoIndicators = forecasted_var,  # from ugarchroll
+  ForecastedVar_Indicators = forecasted_var_with_indicators
+)
+
+ggplot(comparison_df, aes(x = Day)) +
+  geom_line(aes(y = ForecastedVar_NoIndicators, color = "No Indicators"), size = 1.2) +
+  geom_line(aes(y = ForecastedVar_Indicators, color = "With Indicators"), size = 1.2) +
+  geom_line(aes(y = RealizedVar, color = "Realized Volatility"), linetype = "dashed", size = 1.2) +
+  scale_color_manual(values = c("No Indicators" = "blue",
+                                "With Indicators" = "darkgreen",
+                                "Realized Volatility" = "red")) +
+  labs(
+    title = "Rolling 1-Day GARCH Forecasts: With and Without Event Indicators",
+    y = "Variance", x = "Forecast Day",
+    color = "Legend"
+  ) +
+  theme_minimal()
+```
+
+Now, there is a difference between the blue and the green curves. The blue (no indicators) is usually above the green (with indicators).
+
+```{r}
+key_events <- data.frame(
+  Regime1 = ifelse(full_index >= as.Date("2012-04-24") & full_index <= as.Date("2012-10-01"), 1, 0),
+  Regime2 = ifelse(full_index >= as.Date("2022-02-03") & full_index <= as.Date("2022-12-01"), 1, 0)
+)
+
+
+# Fit GARCH model with indicators
+spec_with_indicators <- ugarchspec(
+  variance.model = list(
+    model = "sGARCH",
+    garchOrder = c(1, 1),
+    external.regressors = as.matrix(key_events)),
+  mean.model = list(
+    armaOrder = c(0, 0), 
+    include.mean = TRUE,
+    external.regressors = as.matrix(key_events)
+  ),
+  distribution.model = "std"
+)
+fit_with_indicators <- ugarchfit(spec_with_indicators, train_data$Vola)
+# Extract residuals and squared residuals with indicators
+residuals_train_with_indicators <- residuals(fit_with_indicators, standardize = TRUE)
+squared_residuals_train_with_indicators <- residuals(fit_with_indicators, standardize = FALSE)^2
+
+fit_with_indicators@fit$matcoef
+```
+
+The volatility regime following February 3, 2022, which includes the early phases of the Russia–Ukraine war and subsequent economic instability, showed a statistically significant effect in the GARCH model's variance equation - it has a p-value of only 0.03613.
+
+The earlier 2012 breakpoint likely reflects a shift to a lower-volatility environment, but without a statistically distinct impact relative to the base regime once GARCH dynamics are accounted for.
+
+
+```{r}
+plot(squared_zoo, type = "l", 
+     main = "Squared Returns with Custom Dates",
+     xlab = "Date", ylab = "Squared Returns")
+
+# Add vertical lines at custom dates
+custom_dates <- as.Date(c("2012-04-24", "2012-10-01", "2022-02-03", "2022-12-01"))
+abline(v = custom_dates, col = "red", lty = 2)
+
+```
+
+### Trying to get a significant variable for COVID
+
+```{r}
+plot(squared_zoo, type = "l", 
+     main = "Squared Returns with Custom Dates",
+     xlab = "Date", ylab = "Squared Returns")
+
+# Add vertical lines at custom dates
+custom_dates <- as.Date(c("2020-02-01", "2020-04-01", "2022-02-03", "2023-01-01"))
+abline(v = custom_dates, col = "red", lty = 2)
+```
+
+#### Both COVID and Energy Crisis
+
+```{r}
+key_events <- data.frame(
+  COVID = ifelse(full_index >= as.Date("2020-01-20") & full_index <= as.Date("2020-03-20"), 1, 0),
+  Energy = ifelse(full_index >= as.Date("2022-02-03") & full_index <= as.Date("2022-12-01"), 1, 0)
+)
+
+
+# Fit GARCH model with indicators
+spec_with_indicators <- ugarchspec(
+  variance.model = list(
+    model = "sGARCH",
+    garchOrder = c(1, 1),
+    external.regressors = as.matrix(key_events)),
+  mean.model = list(
+    armaOrder = c(0, 0), 
+    include.mean = TRUE,
+    external.regressors = as.matrix(key_events)
+  ),
+  distribution.model = "std"
+)
+fit_with_indicators <- ugarchfit(spec_with_indicators, train_data$Vola)
+# Extract residuals and squared residuals with indicators
+residuals_train_with_indicators <- residuals(fit_with_indicators, standardize = TRUE)
+squared_residuals_train_with_indicators <- residuals(fit_with_indicators, standardize = FALSE)^2
+
+fit_with_indicators@fit$matcoef
+```
+Best indicator for COVID: 2020-01-20 - 2020-03-20. This is almost significant (on the 5% significance level) if we use it together with the other indicator variable.
+Best indicator for energy crisis: 2022-02-03 - 2022-12-01
+
+#### Only COVID
+```{r}
+key_events <- data.frame(
+  COVID = ifelse(full_index >= as.Date("2020-01-20") & full_index <= as.Date("2020-03-20"), 1, 0)
+)
+
+
+# Fit GARCH model with indicators
+spec_with_indicators <- ugarchspec(
+  variance.model = list(
+    model = "sGARCH",
+    garchOrder = c(1, 1),
+    external.regressors = as.matrix(key_events)),
+  mean.model = list(
+    armaOrder = c(0, 0), 
+    include.mean = TRUE,
+    external.regressors = as.matrix(key_events)
+  ),
+  distribution.model = "std"
+)
+fit_with_indicators <- ugarchfit(spec_with_indicators, train_data$Vola)
+# Extract residuals and squared residuals with indicators
+residuals_train_with_indicators <- residuals(fit_with_indicators, standardize = TRUE)
+squared_residuals_train_with_indicators <- residuals(fit_with_indicators, standardize = FALSE)^2
+
+fit_with_indicators@fit$matcoef
+```
+
+#### Only the Energy Crisis
+```{r}
+key_events <- data.frame(
+  Energy = ifelse(full_index >= as.Date("2022-02-03") & full_index <= as.Date("2022-12-01"), 1, 0)
+)
+
+
+# Fit GARCH model with indicators
+spec_with_indicators <- ugarchspec(
+  variance.model = list(
+    model = "sGARCH",
+    garchOrder = c(1, 1),
+    external.regressors = as.matrix(key_events)),
+  mean.model = list(
+    armaOrder = c(0, 0), 
+    include.mean = TRUE,
+    external.regressors = as.matrix(key_events)
+  ),
+  distribution.model = "std"
+)
+fit_with_indicators <- ugarchfit(spec_with_indicators, train_data$Vola)
+# Extract residuals and squared residuals with indicators
+residuals_train_with_indicators <- residuals(fit_with_indicators, standardize = TRUE)
+squared_residuals_train_with_indicators <- residuals(fit_with_indicators, standardize = FALSE)^2
+
+fit_with_indicators@fit$matcoef
+```
+
+Interestingly, if we include both the COVID and the Energy Crisis indicators, then we get a better fit (smaller p-values for both variables) than if we use them alone.
+
+
+
+
 
 
