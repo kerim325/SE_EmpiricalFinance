@@ -1,0 +1,409 @@
+---
+title: "GARCH_New"
+output: html_document
+date: "2025-07-27"
+---
+
+## Load required libraries
+```{r setup, include=FALSE}
+# install.packages(c("quantmod", "zoo", "ggplot2", "tseries", "rugarch",
+#  "bayesGARCH", "stats", "timeDate", "timeSeries",
+#  "forecast"),
+#  dependencies = TRUE, repos = "https://cloud.r-project.org/")
+
+suppressPackageStartupMessages({
+  library(quantmod) # for getSymbols
+  library(zoo) # for na.omit
+  library(ggplot2) # for plotting
+  library(tseries) # for adf.test
+  library(rugarch) # for GARCH modeling
+  library(bayesGARCH) # for Bayesian GARCH
+  library(stats) # for spectrum, acf, pacf
+  library(timeDate) # for business days
+  library(timeSeries) # for holidaySIFMA
+  library(forecast) # for auto.arima
+  library(xts)
+  library(strucchange)
+})
+```
+
+## Load and Plot 10-Year Treasury Yield Data
+```{r} 
+# "Market Yield on U.S. Treasury Securities at 10-Year Constant Maturity,
+# Quoted on an Investment Basis"
+
+range_date_from <- "2010-01-01" # start date for data
+range_date_to <- format(Sys.Date() - 7, "%Y-%m-%d") # end date - last week
+print(paste("Loading DGS10 data from", range_date_from, "to", range_date_to))
+
+#getSymbols("DGS10", src = "FRED", from = range_date_from, to = range_date_to) # until yesterday
+DGS10 <- read.csv("DGS10.csv")
+DGS10 <- xts(DGS10$DGS10, order.by = as.Date(DGS10$observation_date))
+plot(DGS10, main = "DGS10 - 10Y Treasury Constant Maturity Rate",
+     col = "blue", ylab = "Yield (%)", xlab = "Date")
+```
+
+## Preliminary Data Analysis
+### Check for Missing Values
+```{r}
+# Helper functions
+get_year_as_num <- function(date) as.numeric(format(as.Date(date), "%Y"))
+is_bizday <- function(dates) {
+  years <- get_year_as_num(range_date_from):get_year_as_num(range_date_to)
+  holidays <- as.Date(holidayNYSE(years))
+  # Columbus Day, Veterans Day, National Day of Mourning
+  extra_holidays <-as.Date(
+      c("2010-10-11", "2010-11-11", "2011-10-10", "2011-11-11", "2012-10-08",
+        "2012-11-12", "2013-10-14", "2013-11-11", "2014-10-13", "2014-11-11",
+        "2015-10-12", "2015-11-11", "2016-10-10", "2016-11-11", "2017-10-09",
+        "2018-10-08", "2018-11-12", "2018-12-05", "2019-10-14", "2019-11-11",
+        "2020-10-12", "2020-11-11", "2021-10-11", "2021-11-11", "2022-10-10",
+        "2022-11-11", "2023-10-09", "2024-10-14", "2024-11-11"))
+  holidays <- timeDate(sort(unique(c(holidays, extra_holidays))))
+
+  isBizday(dates, holidays)
+}
+
+# analysis of all days in the range
+temp_time_seq <- timeSequence(from = range_date_from,
+                              to = range_date_to,
+                              by = "day")
+all_dates <- as.Date(temp_time_seq)
+business_days <- as.Date(temp_time_seq[is_bizday(temp_time_seq)])
+non_business_days <- as.Date(setdiff(all_dates, business_days))
+earliest_date <- min(all_dates)
+latest_date <- max(all_dates)
+
+# dates in DGS10
+days_in_data <- index(DGS10)
+duplicate_days_in_data <- days_in_data[duplicated(days_in_data)]
+business_days_in_data <- business_days[business_days %in% days_in_data]
+non_business_days_in_data <- as.Date(non_business_days[non_business_days %in%
+                                                       days_in_data])
+earliest_date_in_data <- min(days_in_data)
+latest_date_in_data <- max(days_in_data)
+real_days_in_data <- days_in_data[days_in_data %in% all_dates]
+missing_days <- as.Date(setdiff(all_dates, days_in_data))
+missing_business_days <- as.Date(setdiff(business_days, days_in_data))
+missing_non_business_days <- as.Date(setdiff(non_business_days, days_in_data))
+
+# Analysis of NAs
+days_with_na_in_data <- index(DGS10[is.na(DGS10)])
+business_days_with_na_in_data <- business_days[business_days %in%
+                                                 days_with_na_in_data]
+non_business_days_with_na <- non_business_days[non_business_days %in%
+                                                 days_with_na_in_data]
+# printing results
+cat("Business Days in Data:", length(business_days_in_data), "\n")
+cat("Non-Business Days in Data:", length(non_business_days_in_data), "\n")
+cat("Missing Days in Data:", length(missing_days), "\n")
+cat("Missing Business Days in Data:", length(missing_business_days),
+    paste(missing_business_days, collapse = ", "), "\n")
+cat("Missing Non-Business Days in Data:", length(missing_non_business_days), "\n")
+print("\n")
+cat("Days with NA in Data:", length(days_with_na_in_data), "\n")
+cat("Business Days with NA in Data:", length(business_days_with_na_in_data), "\n")
+cat("Non-Business Days with NA in Data:", length(non_business_days_with_na), "\n")
+print("\n")
+cat("Business Days with NA in Data:", paste(business_days_with_na_in_data, collapse = ", "), "\n")
+```
+
+### Removing NAs
+```{r}
+DGS10 <- na.omit(DGS10)
+plot(DGS10, main = "DGS10 - 10Y Treasury Constant Maturity Rate",
+     col = "blue", ylab = "Yield (%)", xlab = "Date")
+```
+
+### Check for Stationarity
+```{r}
+# testing if its stationary
+adf.test(DGS10, alternative = "stationary")
+```
+
+```{r}
+# diff computes the daily change. The first value is NA since there is no
+# previous value to subtract from the first one, so we remove it.
+DGS10_diff <- diff(DGS10)[-1]
+DGS10_diff_sq <- DGS10_diff^2
+colnames(DGS10_diff_sq) <- "SquaredDailyChange"
+plot(DGS10_diff_sq, main = "Squared Daily Yield Changes in DGS10",
+     col = "darkred", ylab = "∆ Yield (%)", xlab = "Date")
+```
+
+
+```{r}
+# Define named list of indicators
+event_list <- list(
+  COVID_short_temporary = ifelse(full_index >= as.Date("2020-01-01") & full_index <= as.Date("2020-05-01"), 1, 0),
+  COVID_long_temporary = full_index >= as.Date("2020-01-01") & full_index <= as.Date("2022-01-01"),
+  COVID_permanent = ifelse(full_index >= as.Date("2020-01-01"), 1, 0),
+  Trump1_temporary = ifelse(full_index >= as.Date("2016-11-08") & full_index <= as.Date("2021-01-20"), 1, 0),
+  Trump1_permanent = ifelse(full_index >= as.Date("2016-11-08"), 1, 0),
+  Trump2 = ifelse(full_index >= as.Date("2024-11-05"), 1, 0)
+)
+
+# Prepare container for p-values
+pvals <- numeric(length(event_list))
+names(pvals) <- names(event_list)
+
+# Loop through events
+for (i in seq_along(event_list)) {
+  xreg <- matrix(event_list[[i]], ncol = 1)
+  
+  spec <- ugarchspec(
+    variance.model = list(model = "sGARCH", garchOrder = c(1, 1),
+                          external.regressors = xreg),
+    mean.model = list(armaOrder = c(0, 0), include.mean = TRUE),
+    distribution.model = "std"
+  )
+  
+  fit <- ugarchfit(spec = spec, data = train_data$Vola, solver = "hybrid")
+  
+  # Extract p-value from variance regressor (vxreg1)
+  matcoef <- fit@fit$matcoef
+  pvals[i] <- matcoef["vxreg1", "Pr(>|t|)"]
+}
+
+# Convert p-values to data frame
+pval_df <- data.frame(
+  Event = names(pvals),
+  PValue = as.numeric(pvals)
+)
+
+# Barplot
+ggplot(pval_df, aes(x = reorder(Event, -PValue), y = PValue)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  geom_hline(yintercept = 0.05, linetype = "dashed", color = "red", linewidth = 1) +
+  labs(
+    title = "P-values of Individual Event Indicators (Variance Equation)",
+    x = "Event Indicator", y = "P-value"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(axis.text.x = element_text(angle = 25, hjust = 1))
+```
+
+
+```{r}
+# Define named list of indicators
+event_list <- list(
+  COVID_short = ifelse(full_index >= as.Date("2020-02-01") & full_index <= as.Date("2020-04-01"), 1, 0),
+  Ukraine_War_temporary = full_index >= as.Date("2022-02-03") & full_index <= as.Date("2023-01-01"),
+  Ukraine_War_permanent = ifelse(full_index >= as.Date("2022-02-03"), 1, 0),
+  Post_Crisis_temporary = ifelse(full_index >= as.Date("2012-04-24") & full_index <= as.Date("2013-01-01"), 1, 0),
+  Post_Crisis_permanent = ifelse(full_index >= as.Date("2012-04-24"), 1, 0)
+)
+
+# Prepare container for p-values
+pvals <- numeric(length(event_list))
+names(pvals) <- names(event_list)
+
+# Loop through events
+for (i in seq_along(event_list)) {
+  xreg <- matrix(event_list[[i]], ncol = 1)
+  
+  spec <- ugarchspec(
+    variance.model = list(model = "sGARCH", garchOrder = c(1, 1),
+                          external.regressors = xreg),
+    mean.model = list(armaOrder = c(0, 0), include.mean = TRUE),
+    distribution.model = "std"
+  )
+  
+  fit <- ugarchfit(spec = spec, data = train_data$Vola, solver = "hybrid")
+  
+  # Extract p-value from variance regressor (vxreg1)
+  matcoef <- fit@fit$matcoef
+  pvals[i] <- matcoef["vxreg1", "Pr(>|t|)"]
+}
+
+# Convert p-values to data frame
+pval_df <- data.frame(
+  Event = names(pvals),
+  PValue = as.numeric(pvals)
+)
+
+# Barplot
+ggplot(pval_df, aes(x = reorder(Event, -PValue), y = PValue)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  geom_hline(yintercept = 0.05, linetype = "dashed", color = "red", linewidth = 1) +
+  labs(
+    title = "P-values of Individual Event Indicators (Variance Equation)",
+    x = "Event Indicator", y = "P-value"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(axis.text.x = element_text(angle = 25, hjust = 1))
+```
+
+```{r}
+# Define named list of indicators
+event_list <- list(
+  COVID_short = ifelse(full_index >= as.Date("2020-02-01") & full_index <= as.Date("2020-04-01"), 1, 0),
+  Ukraine_War_temporary = full_index >= as.Date("2022-02-03") & full_index <= as.Date("2023-01-01"),
+  Ukraine_War_permanent = ifelse(full_index >= as.Date("2022-02-03"), 1, 0)
+)
+
+# Prepare container for p-values
+pvals <- numeric(length(event_list))
+names(pvals) <- names(event_list)
+
+# Loop through events
+for (i in seq_along(event_list)) {
+  xreg <- matrix(event_list[[i]], ncol = 1)
+  
+  spec <- ugarchspec(
+    variance.model = list(model = "sGARCH", garchOrder = c(1, 1),
+                          external.regressors = xreg),
+    mean.model = list(armaOrder = c(0, 0), include.mean = TRUE),
+    distribution.model = "std"
+  )
+  
+  fit <- ugarchfit(spec = spec, data = train_data$Vola, solver = "hybrid")
+  
+  # Extract p-value from variance regressor (vxreg1)
+  matcoef <- fit@fit$matcoef
+  pvals[i] <- matcoef["vxreg1", "Pr(>|t|)"]
+}
+
+# Convert p-values to data frame
+pval_df <- data.frame(
+  Event = names(pvals),
+  PValue = as.numeric(pvals)
+)
+
+# Barplot
+ggplot(pval_df, aes(x = reorder(Event, -PValue), y = PValue)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  geom_hline(yintercept = 0.05, linetype = "dashed", color = "red", linewidth = 1) +
+  labs(
+    title = "P-values of Individual Event Indicators (Variance Equation)",
+    x = "Event Indicator", y = "P-value"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(axis.text.x = element_text(angle = 25, hjust = 1))
+```
+
+```{r}
+plot(squared_zoo, type = "l", 
+     main = "Squared Returns with Time Frames of COVID and Ukraine War",
+     xlab = "Date", ylab = "Squared Returns")
+
+# Add vertical lines at custom dates
+custom_dates <- as.Date(c("2020-02-01", "2020-04-01", "2022-02-03", "2023-01-01"))
+abline(v = custom_dates, col = "red", lty = 2)
+```
+
+```{r}
+# Setup
+N <- length(DGS10_diff)
+forecast_horizon <- 63
+full_index <- index(DGS10_diff)
+realized_returns <- tail(DGS10_diff, forecast_horizon)
+realized_var <- realized_returns^2
+
+# Define rolling predictions container
+forecasted_var_with_indicators <- numeric(forecast_horizon)
+
+# Create full event matrix matching the entire series
+event_indicators_full <- data.frame(
+  Regime1 = ifelse(full_index >= as.Date("2020-02-01") & full_index <= as.Date("2020-04-01"), 1, 0),
+  Regime2 = ifelse(full_index >= as.Date("2022-02-03") & full_index <= as.Date("2023-01-01"), 1, 0)
+)
+
+# Rolling forecast with external regressors
+for (i in 1:forecast_horizon) {
+  
+  # Subset data up to time t + i - 1
+  train_slice <- DGS10_diff[1:(N - forecast_horizon + i - 1)]
+  reg_slice <- event_indicators_full[1:(N - forecast_horizon + i - 1), ]
+
+  # Take the matching regressors for variance equation
+  spec_step <- ugarchspec(
+    variance.model = list(model = "sGARCH", garchOrder = c(1, 1),
+                          external.regressors = as.matrix(reg_slice)),
+    mean.model = list(armaOrder = c(0, 0), include.mean = TRUE),
+    distribution.model = "std"
+  )
+
+  # Fit and forecast
+  fit_step <- ugarchfit(spec_step, train_slice, solver = "hybrid", solver.control = list(trace = 0))
+  fc <- ugarchforecast(fit_step, n.ahead = 1)
+  forecasted_var_with_indicators[i] <- sigma(fc)^2
+}
+```
+
+```{r}
+# Comparison dataframe
+comparison_df <- data.frame(
+  Day = 1:forecast_horizon,
+  RealizedVar = realized_var,
+  ForecastedVar_NoIndicators = forecasted_var,  # from ugarchroll
+  ForecastedVar_Indicators = forecasted_var_with_indicators
+)
+
+ggplot(comparison_df, aes(x = Day)) +
+  geom_line(aes(y = ForecastedVar_NoIndicators, color = "No Indicators"), size = 1.2) +
+  geom_line(aes(y = ForecastedVar_Indicators, color = "With Indicators"), size = 1.2) +
+  geom_line(aes(y = RealizedVar, color = "Realized Volatility"), linetype = "dashed", size = 1.2) +
+  scale_color_manual(values = c("No Indicators" = "blue",
+                                "With Indicators" = "darkgreen",
+                                "Realized Volatility" = "red")) +
+  labs(
+    title = "Rolling 1-Day GARCH Forecasts: With and Without Event Indicators",
+    y = "Variance", x = "Forecast Day",
+    color = "Legend"
+  ) +
+  theme_minimal()
+```
+
+### Including FOMC Dates
+```{r}
+# FOMC meeting dates
+fomc_dates <- as.Date(c(
+  "2022-01-26", "2022-03-16", "2022-05-04", "2022-06-15",
+  "2022-07-27", "2022-09-21", "2022-11-02", "2022-12-14",
+  "2023-02-01", "2023-03-22", "2023-05-03", "2023-06-14",
+  "2023-07-26", "2023-09-20", "2023-11-01", "2023-12-13"
+))
+
+# # Creating FOMC dummy (±7 days window)
+full_index <- index(DGS10_diff)
+
+fomc_window <- rep(0, length(full_index))
+for (f_date in fomc_dates) {
+  fomc_window[full_index >= (f_date - 7) & full_index <= (f_date + 7)] <- 1
+}
+fomc_dummy <- matrix(fomc_window, ncol = 1)
+
+
+# Define GARCH(1,1) with external regressor in variance
+spec_fomc <- ugarchspec(
+  variance.model = list(
+    model = "sGARCH",
+    garchOrder = c(1, 1),
+    external.regressors = fomc_dummy
+  ),
+  mean.model = list(
+    armaOrder = c(0, 0),
+    include.mean = TRUE
+  ),
+  distribution.model = "std"
+)
+
+# Fit mode, extracting coefficients
+fit_fomc <- ugarchfit(spec = spec_fomc, data = DGS10_diff)
+coef_mat <- fit_fomc@fit$matcoef
+
+# Convert to data.frame with correct column names
+coef_df <- as.data.frame(coef_mat)
+colnames(coef_df) <- c("Estimate", "Std.Error", "t.value", "p.value")
+coef_df$Parameter <- rownames(coef_mat)
+rownames(coef_df) <- NULL
+
+# Reorder columns for readability
+coef_df <- coef_df[, c("Parameter", "Estimate", "Std.Error", "t.value", "p.value")]
+print(coef_df)
+```
+
+The FOMC indicator is statistically significant at the 5% level because it has a p-value of 0.01185, suggesting that Treasury market volatility tends to shift around monetary policy announcements. The positive sign (2.83e-4) indicates that uncertainty temporarily increases as market participants price in new information about the policy stance.
+
+
