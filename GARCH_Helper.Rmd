@@ -134,6 +134,7 @@ plot(DGS10_diff_sq, main = "Squared Daily Yield Changes in DGS10",
 
 ```{r}
 # Define named list of indicators
+full_index <- index(DGS10_diff)
 event_list <- list(
   COVID_short_temporary = ifelse(full_index >= as.Date("2020-01-01") & full_index <= as.Date("2020-05-01"), 1, 0),
   COVID_long_temporary = full_index >= as.Date("2020-01-01") & full_index <= as.Date("2022-01-01"),
@@ -158,7 +159,7 @@ for (i in seq_along(event_list)) {
     distribution.model = "std"
   )
   
-  fit <- ugarchfit(spec = spec, data = train_data$Vola, solver = "hybrid")
+  fit <- ugarchfit(spec = spec, data = DGS10_diff, solver = "hybrid")
   
   # Extract p-value from variance regressor (vxreg1)
   matcoef <- fit@fit$matcoef
@@ -209,7 +210,7 @@ for (i in seq_along(event_list)) {
     distribution.model = "std"
   )
   
-  fit <- ugarchfit(spec = spec, data = train_data$Vola, solver = "hybrid")
+  fit <- ugarchfit(spec = spec, data = DGS10_diff, solver = "hybrid")
   
   # Extract p-value from variance regressor (vxreg1)
   matcoef <- fit@fit$matcoef
@@ -257,7 +258,7 @@ for (i in seq_along(event_list)) {
     distribution.model = "std"
   )
   
-  fit <- ugarchfit(spec = spec, data = train_data$Vola, solver = "hybrid")
+  fit <- ugarchfit(spec = spec, data = DGS10_diff, solver = "hybrid")
   
   # Extract p-value from variance regressor (vxreg1)
   matcoef <- fit@fit$matcoef
@@ -283,6 +284,11 @@ ggplot(pval_df, aes(x = reorder(Event, -PValue), y = PValue)) +
 ```
 
 ```{r}
+squared_df <- data.frame(squared = DGS10_diff^2)
+
+# Convert to zoo object
+squared_zoo <- zoo(squared_df$squared, order.by = as.Date(rownames(squared_df)))
+
 plot(squared_zoo, type = "l", 
      main = "Squared Returns with Time Frames of COVID and Ukraine War",
      xlab = "Date", ylab = "Squared Returns")
@@ -332,6 +338,21 @@ for (i in 1:forecast_horizon) {
 ```
 
 ```{r}
+# Rolling 1-day ahead forecast
+roll <- ugarchroll(
+  spec,
+  data = DGS10_diff,
+  forecast.length = forecast_horizon,
+  refit.every = 1,
+  refit.window = "moving",
+  solver = "hybrid",
+  calculate.VaR = FALSE
+)
+
+# Extract forecasted sigma (volatility)
+forecasted_sigma <- as.numeric(roll@forecast$density[, "Sigma"])
+forecasted_var <- forecasted_sigma^2  # conditional variance
+
 # Comparison dataframe
 comparison_df <- data.frame(
   Day = 1:forecast_horizon,
@@ -405,5 +426,62 @@ print(coef_df)
 ```
 
 The FOMC indicator is statistically significant at the 5% level because it has a p-value of 0.01185, suggesting that Treasury market volatility tends to shift around monetary policy announcements. The positive sign (2.83e-4) indicates that uncertainty temporarily increases as market participants price in new information about the policy stance.
+
+
+#### Prediction with all indicators + FOMC
+```{r}
+# Create full event matrix matching the entire series + FOMC dummy
+event_indicators_full <- data.frame(
+  Regime1 = ifelse(full_index >= as.Date("2020-02-01") & full_index <= as.Date("2020-04-01"), 1, 0),
+  Regime2 = ifelse(full_index >= as.Date("2022-02-03") & full_index <= as.Date("2023-01-01"), 1, 0),
+  FOMC = fomc_window  # just append here
+)
+
+# Rolling forecast with external regressors
+for (i in 1:forecast_horizon) {
+  
+  # Subset data up to time t + i - 1
+  train_slice <- DGS10_diff[1:(N - forecast_horizon + i - 1)]
+  reg_slice <- event_indicators_full[1:(N - forecast_horizon + i - 1), ]
+
+  # Take the matching regressors for variance equation
+  spec_step <- ugarchspec(
+    variance.model = list(model = "sGARCH", garchOrder = c(1, 1),
+                          external.regressors = as.matrix(reg_slice)),
+    mean.model = list(armaOrder = c(0, 0), include.mean = TRUE),
+    distribution.model = "std"
+  )
+
+  # Fit and forecast
+  fit_step <- ugarchfit(spec_step, train_slice, solver = "hybrid", solver.control = list(trace = 0))
+  fc <- ugarchforecast(fit_step, n.ahead = 1)
+  forecasted_var_with_indicators[i] <- sigma(fc)^2
+}
+```
+
+```{r}
+# Comparison dataframe
+comparison_df <- data.frame(
+  Day = 1:forecast_horizon,
+  RealizedVar = realized_var,
+  ForecastedVar_NoIndicators = forecasted_var,  # from ugarchroll
+  ForecastedVar_Indicators = forecasted_var_with_indicators
+)
+
+ggplot(comparison_df, aes(x = Day)) +
+  geom_line(aes(y = ForecastedVar_NoIndicators, color = "No Indicators"), size = 1.2) +
+  geom_line(aes(y = ForecastedVar_Indicators, color = "With Indicators"), size = 1.2) +
+  geom_line(aes(y = RealizedVar, color = "Realized Volatility"), linetype = "dashed", size = 1.2) +
+  scale_color_manual(values = c("No Indicators" = "blue",
+                                "With Indicators" = "darkgreen",
+                                "Realized Volatility" = "red")) +
+  labs(
+    title = "Rolling 1-Day GARCH Forecasts: With and Without Event Indicators",
+    y = "Variance", x = "Forecast Day",
+    color = "Legend"
+  ) +
+  theme_minimal()
+```
+
 
 
