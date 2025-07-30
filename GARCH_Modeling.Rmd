@@ -8,9 +8,11 @@ output:
 ## Load Required Libraries
 ```{r}
 # install.packages(c("quantmod", "zoo", "ggplot2", "tseries", "rugarch",
-#  "bayesGARCH", "stats", "timeDate", "timeSeries",
-#  "forecast"),
-#  dependencies = TRUE, repos = "https://cloud.r-project.org/")
+#                    "bayesGARCH", "stats", "timeDate", "timeSeries",
+#                    "forecast", "xts", "FinTS", "strucchange"),
+#                 dependencies = TRUE,
+#                 repos = "https://cloud.r-project.org/"
+# )
 
 suppressPackageStartupMessages({
   library(quantmod) # for getSymbols
@@ -23,7 +25,8 @@ suppressPackageStartupMessages({
   library(timeDate) # for business days
   library(timeSeries) # for holidaySIFMA
   library(forecast) # for auto.arima
-  library(xts)
+  library(xts) # for xts objects
+  library(FinTS) # for ArchTest
   library(strucchange)
 })
 ```
@@ -65,7 +68,6 @@ is_bizday <- function(dates) {
         "2020-10-12", "2020-11-11", "2021-10-11", "2021-11-11", "2022-10-10",
         "2022-11-11", "2023-10-09", "2024-10-14", "2024-11-11"))
   holidays <- timeDate(sort(unique(c(holidays, extra_holidays))))
-
   isBizday(dates, holidays)
 }
 
@@ -83,8 +85,7 @@ latest_date <- max(all_dates)
 days_in_data <- index(DGS10)
 duplicate_days_in_data <- days_in_data[duplicated(days_in_data)]
 business_days_in_data <- business_days[business_days %in% days_in_data]
-non_business_days_in_data <- as.Date(non_business_days[non_business_days %in%
-                                                       days_in_data])
+non_business_days_in_data <- as.Date(non_business_days[non_business_days %in% days_in_data])
 earliest_date_in_data <- min(days_in_data)
 latest_date_in_data <- max(days_in_data)
 real_days_in_data <- days_in_data[days_in_data %in% all_dates]
@@ -94,10 +95,9 @@ missing_non_business_days <- as.Date(setdiff(non_business_days, days_in_data))
 
 # Analysis of NAs
 days_with_na_in_data <- index(DGS10[is.na(DGS10)])
-business_days_with_na_in_data <- business_days[business_days %in%
-                                                 days_with_na_in_data]
-non_business_days_with_na <- non_business_days[non_business_days %in%
-                                                 days_with_na_in_data]
+business_days_with_na_in_data <- business_days[business_days %in% days_with_na_in_data]
+non_business_days_with_na <- non_business_days[non_business_days %in% days_with_na_in_data]
+
 # printing results
 cat("Business Days in Data:", length(business_days_in_data), "\n")
 cat("Non-Business Days in Data:", length(non_business_days_in_data), "\n")
@@ -131,10 +131,8 @@ adf.test(DGS10, alternative = "stationary")
 ```
 
 p-value is very large, so we have to accept H0 --> data is not stationary <br>
-GARCH models require weakly stationary time series which can be tested with ADF
-
-Compute daily changes, first difference to make it stationary.
-
+-------------
+We use the squared daily changes to model volatility.
 ```{r}
 # diff computes the daily change. The first value is NA since there is no
 # previous value to subtract from the first one, so we remove it.
@@ -147,13 +145,10 @@ plot(DGS10_diff_sq, main = "Squared Daily Yield Changes in DGS10",
 
 Major spikes around early 2020 (pandemic) and post-2022 (inflation uncertainty)
 
-
-
-
-
+GARCH models require weakly stationary time series which can be tested with ADF test.
 ```{r}
 # testing stationarity of the daily changes
-adf.test(DGS10_diff_sq)
+adf.test(DGS10_diff_sq, alternative = "stationary")
 ```
 
 p-value is very low, so we can say that the data is weakly stationary now (there is enough statistical evidence to reject H0). 
@@ -194,6 +189,16 @@ pacf(DGS10_diff_sq, main = "PACF of DGS10 Squared Daily Changes")
 The PACF shows significant spikes up to lag ~7, especially lags 1–5.
 This suggests that the squared daily changes exhibit short-term persistence or clustering.
 There is conditional heteroskedasticity, supporting the use of ARCH/GARCH models for volatility modeling.
+
+### ARCH-Test
+```{r}
+# ARCH-LM test for conditional heteroskedasticity
+for (L in c(1, 7, 14, 30, 60, 120, 365*2, 365*3, 365*4)) {
+  print(ArchTest(DGS10_diff, lags = L, demean = TRUE))
+}
+```
+
+Volatility in 10-year Treasury yields shows strong short- and medium-term persistence, and statistically significant ARCH effects for up to 3 years. Beyond that, the influence of past squared shocks on current variance becomes negligible.
 
 ## GARCH Model Specification and Fitting
 ### Mean model selection
